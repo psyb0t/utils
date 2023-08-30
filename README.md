@@ -1,4 +1,4 @@
-# utils
+# Utils
 
 A collection of small utility scripts to make life easier.
 
@@ -18,19 +18,21 @@ This script converts a given video file to a GIF and makes a specified color tra
 ### Usage
 
 ```
-./convert-video-to-transparent-gif.sh <video_filename> <transparent_color>
+./convert-video-to-transparent-gif.sh <video_filename> <transparent_color> [scale_divisor] [framerate]
 ```
 
 - `<video_filename>`: The name of the video file you want to convert.
 - `<transparent_color>`: The color you want to make transparent in the GIF.
+- `[scale_divisor]`: Optional. The divisor for the original dimensions of the video (default is 1).
+- `[framerate]`: Optional. The framerate for the GIF (default is 10).
 
 ### Example
 
 ```
-./convert-video-to-transparent-gif.sh video.mov black
+./convert-video-to-transparent-gif.sh video.mov black 2 15
 ```
 
-This will create a GIF named `video.gif` with the black color made transparent.
+This will create a GIF named `video.gif` with the black color made transparent, dimensions divided by 2, and a framerate of 15.
 
 ---
 

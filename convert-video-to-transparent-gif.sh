@@ -2,7 +2,7 @@
 
 # Check if the required arguments were provided
 if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Usage: $0 <video_filename> <transparent_color>"
+    echo "Usage: $0 <video_filename> <transparent_color> [scale_divisor] [framerate]"
     exit 1
 fi
 
@@ -10,8 +10,12 @@ fi
 filename=$(basename -- "$1")
 filename="${filename%.*}"
 
+# Optional scale_divisor and framerate parameters
+scale_divisor=${3:-1} # Default to 1 if not provided
+framerate=${4:-10}    # Default to 10 if not provided
+
 # Convert the video to a GIF using FFmpeg
-ffmpeg -i "$1" -vf "scale=iw/1:ih/1" -r 10 "${filename}.gif"
+ffmpeg -i "$1" -vf "scale=iw/$scale_divisor:ih/$scale_divisor" -r $framerate "${filename}.gif"
 
 # Make the GIF transparent using ImageMagick and overwrite the original GIF
 convert "${filename}.gif" -transparent "$2" "${filename}.gif"
