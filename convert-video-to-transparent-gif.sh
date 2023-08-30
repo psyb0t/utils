@@ -18,6 +18,6 @@ framerate=${4:-10}    # Default to 10 if not provided
 ffmpeg -i "$1" -vf "scale=iw/$scale_divisor:ih/$scale_divisor" -r $framerate "${filename}.gif"
 
 # Make the GIF transparent using ImageMagick and overwrite the original GIF
-convert "${filename}.gif" -transparent "$2" "${filename}.gif"
+convert -dispose Previous "${filename}.gif" -transparent "$2" "${filename}.gif"
 
 echo "Done. Updated ${filename}.gif with transparency."
