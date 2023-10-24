@@ -6,6 +6,7 @@ A collection of small utility scripts to make life easier.
 
 - [Convert Video to Transparent GIF](#convert-video-to-transparent-gif)
 - [SCP Proxy](#scp-proxy)
+- [Find File](#find-file)
 - [Other Utilities (TBD)](#other-utilities-tbd)
 
 ---
