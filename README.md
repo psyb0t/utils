@@ -18,7 +18,7 @@ This script converts a given video file to a GIF and makes a specified color tra
 
 ### Usage
 
-```
+```bash
 ./convert-video-to-transparent-gif.sh <video_filename> <transparent_color> [scale_divisor] [framerate]
 ```
 
@@ -29,7 +29,7 @@ This script converts a given video file to a GIF and makes a specified color tra
 
 ### Example
 
-```
+```bash
 ./convert-video-to-transparent-gif.sh video.mov black 2 15
 ```
 
@@ -45,7 +45,7 @@ This script allows you to transfer files to a remote host via an SSH proxy. It f
 
 ### Usage
 
-```
+```bash
 ./scp-proxy.sh <filepath> <proxy_info> <remote_info> <target_path>
 ```
 
@@ -56,13 +56,35 @@ This script allows you to transfer files to a remote host via an SSH proxy. It f
 
 ### Example
 
-```
+```bash
 ./scp-proxy.sh myfile.txt user1@proxy.com:22 user2@remote.com:22 /some/remote/directory
 ```
 
 This will transfer `myfile.txt` to `/some/remote/directory` on `remote.com` via the proxy `proxy.com`.
 
 ---
+
+## Find File
+
+### Description
+
+This script allows you to search for a specific file recursively within the current directory and all its subdirectories. It's a handy way to locate files without having to manually dig through directories.
+
+### Usage
+
+```bash
+./findfile.sh "<filename>"
+```
+
+- `<filename>`: The name or part of the name of the file you're searching for.
+
+### Example
+
+```bash
+./findfile.sh "report"
+```
+
+In this example, the script will search for any file containing the word "report" in its name starting from the current directory and diving down through all subdirectories.
 
 ## Other Utilities (TBD)
 
