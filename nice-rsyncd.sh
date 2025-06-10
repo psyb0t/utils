@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Bash shebang - tells system to run this with bash
 
 # Exit on any error, undefined variables, or pipe failures
 set -euo pipefail
