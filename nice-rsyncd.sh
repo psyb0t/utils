@@ -11,6 +11,13 @@ if ! command -v rsync &>/dev/null; then
   exit 1
 fi
 
+# Check if telegram-logger-client is available for notifications
+if ! command -v telegram-logger-client &>/dev/null; then
+  echo >&2 "WARNING: telegram-logger-client not found - notifications will be disabled"
+  echo >&2 "Install with: pipx install telegram-logger-client"
+  echo >&2 "Documentation: https://github.com/psyb0t/py-telegram-logger-client"
+fi
+
 ################################################################################
 # CONSTANTS - these don't change during script execution
 ################################################################################
@@ -36,26 +43,27 @@ log() {
 }
 
 notify_user() {
-  # Send desktop notifications using notify-send (if available)
+  # Send notifications via telegram-logger-client instead of desktop notifications
   local level=$1 message=$2
 
-  # Check if notify-send command exists on the system
-  if command -v notify-send &>/dev/null; then
-    # Set notification urgency based on log level
+  # Check if telegram-logger-client is available
+  if command -v telegram-logger-client &>/dev/null; then
+    # Convert log levels to telegram-logger format (lowercase)
+    local tg_level
     case $level in
     ERROR | FATAL | CRITICAL)
-      # Critical errors get high priority notifications
-      notify-send -u critical "$SCRIPT_NAME [$level]" "$message"
+      tg_level="error"
       ;;
     WARNING)
-      # Warnings get normal priority
-      notify-send -u normal "$SCRIPT_NAME [$level]" "$message"
+      tg_level="warning"
       ;;
     *)
-      # Everything else gets low priority
-      notify-send -u low "$SCRIPT_NAME [$level]" "$message"
+      tg_level="info"
       ;;
     esac
+
+    # Send to telegram (suppress output to avoid log spam)
+    telegram-logger-client --caller="$SCRIPT_NAME" --level="$tg_level" --message="$message" &>/dev/null || true
   fi
 }
 
