@@ -8,6 +8,8 @@ set -euo pipefail
 
 SCRIPT_NAME=$(basename "$0")
 CONFIG_FILE=""
+INTERVAL_MINUTES=""
+CONTINUOUS_MODE=false
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 MIN_FREE_DISK_GB=10
 
@@ -109,20 +111,51 @@ notify_user() {
 }
 
 # ============================================================================
+# SIGNAL HANDLING FOR CONTINUOUS MODE
+# ============================================================================
+
+handle_signal() {
+    local signal=$1
+    log "$LOG_LEVEL_INFO" "Received signal $signal, shutting down gracefully..."
+    debug_log "Signal handler triggered: $signal"
+
+    # Kill any running borg processes
+    pkill -f "borg create\|borg prune\|borg compact" 2>/dev/null || true
+
+    log "$LOG_LEVEL_INFO" "Backup script stopped"
+    exit 0
+}
+
+setup_signal_handlers() {
+    debug_log "Setting up signal handlers for continuous mode"
+    trap 'handle_signal SIGTERM' TERM
+    trap 'handle_signal SIGINT' INT
+    trap 'handle_signal SIGHUP' HUP
+}
+
+# ============================================================================
 # HELP AND VALIDATION FUNCTIONS
 # ============================================================================
 
 show_help() {
     cat <<EOF
-Usage: $SCRIPT_NAME <config_file>
+Usage: $SCRIPT_NAME <config_file> [interval_minutes]
 
 Arguments:
     config_file            Path to backup config file (required)
+    interval_minutes       Run continuously with this interval in minutes (optional)
+                           If not provided, runs once and exits
 
 Config file format (retention period is REQUIRED for each line):
     source_path:destination_path --retention-period=N [--exclude=pattern1,pattern2,...]
 
 Examples:
+    # Run once
+    $SCRIPT_NAME backup.conf
+
+    # Run continuously every 30 minutes
+    $SCRIPT_NAME backup.conf 30
+
     /home/user/docs:/backup/docs --retention-period=30
     /home/user/code:/backup/code --retention-period=60 --exclude=*.pyc,**/venv,**/node_modules
     /var/log:/backup/logs --retention-period=7
@@ -240,7 +273,7 @@ parse_args() {
     debug_log "Parsing command line arguments: $*"
     debug_log "Number of arguments: $#"
 
-    if [[ $# -ne 1 ]]; then
+    if [[ $# -lt 1 || $# -gt 2 ]]; then
         debug_log "Incorrect number of arguments provided"
         show_help
         exit 1
@@ -248,6 +281,22 @@ parse_args() {
 
     CONFIG_FILE="$1"
     debug_log "Config file argument: $CONFIG_FILE"
+
+    # Check for interval argument
+    if [[ $# -eq 2 ]]; then
+        INTERVAL_MINUTES="$2"
+        debug_log "Interval argument: $INTERVAL_MINUTES minutes"
+
+        # Validate interval is a positive integer
+        if [[ ! "$INTERVAL_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
+            log "$LOG_LEVEL_FATAL" "Interval must be a positive integer (minutes)"
+        fi
+
+        CONTINUOUS_MODE=true
+        debug_log "Continuous mode enabled"
+    else
+        debug_log "No interval provided, running in single-shot mode"
+    fi
 
     # Verify config file exists and is readable
     if [[ ! -r "$CONFIG_FILE" ]]; then
@@ -258,6 +307,11 @@ parse_args() {
     debug_log "Config file exists and is readable"
 
     log "$LOG_LEVEL_INFO" "Using config: $CONFIG_FILE"
+    if [[ "$CONTINUOUS_MODE" == true ]]; then
+        log "$LOG_LEVEL_INFO" "Running continuously every $INTERVAL_MINUTES minutes"
+    else
+        log "$LOG_LEVEL_INFO" "Running once"
+    fi
     log "$LOG_LEVEL_INFO" "All backup lines must specify --retention-period=N"
     debug_log "Current log level set to: $CURRENT_LOG_LEVEL"
 }
@@ -529,6 +583,10 @@ run_all_backups() {
     local total_success=0
     local total_failed=0
 
+    # Generate new timestamp for this run
+    TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+    debug_log "Updated timestamp for this backup run: $TIMESTAMP"
+
     local total_jobs=${#BACKUP_SOURCES[@]}
     log "$LOG_LEVEL_INFO" "Starting backup run with $total_jobs tasks."
 
@@ -590,11 +648,44 @@ run_all_backups() {
     log "$LOG_LEVEL_INFO" "Failed: $total_failed"
     debug_log "Script execution summary complete"
 
-    # Exit with error code if any backups failed
-    if [[ $total_failed -gt 0 ]]; then
-        debug_log "Exiting with error code 1 due to failed backups"
+    # In continuous mode, don't exit on failures, just log them
+    if [[ "$CONTINUOUS_MODE" == false && $total_failed -gt 0 ]]; then
+        debug_log "Exiting with error code 1 due to failed backups (single-shot mode)"
         exit 1
     fi
+}
+
+# ============================================================================
+# CONTINUOUS MODE
+# ============================================================================
+
+run_continuous() {
+    local interval_seconds=$((INTERVAL_MINUTES * 60))
+
+    log "$LOG_LEVEL_INFO" "Starting continuous backup mode (interval: ${INTERVAL_MINUTES} minutes)"
+    setup_signal_handlers
+
+    local run_counter=1
+
+    while true; do
+        log "$LOG_LEVEL_INFO" "========== Backup Run #$run_counter =========="
+
+        # Re-read config file each time to pick up changes
+        BACKUP_SOURCES=()
+        BACKUP_DESTS=()
+        BACKUP_RETENTIONS=()
+        BACKUP_EXCLUDES=()
+
+        process_config_file "$CONFIG_FILE"
+        run_all_backups
+
+        run_counter=$((run_counter + 1))
+
+        log "$LOG_LEVEL_INFO" "Waiting ${INTERVAL_MINUTES} minutes until next backup run..."
+        debug_log "Sleeping for $interval_seconds seconds"
+
+        sleep "$interval_seconds"
+    done
 }
 
 # ============================================================================
@@ -614,11 +705,17 @@ main() {
     check_borg_installed
     check_telegram_logger_client_installed
 
-    # Phase 1: Read and parse the entire config file
-    process_config_file "$CONFIG_FILE"
+    if [[ "$CONTINUOUS_MODE" == true ]]; then
+        debug_log "Running in continuous mode"
+        run_continuous
+    else
+        debug_log "Running in single-shot mode"
+        # Phase 1: Read and parse the entire config file
+        process_config_file "$CONFIG_FILE"
 
-    # Phase 2: Execute all the loaded backup jobs
-    run_all_backups
+        # Phase 2: Execute all the loaded backup jobs
+        run_all_backups
+    fi
 
     debug_log "Main function completed successfully"
 }
