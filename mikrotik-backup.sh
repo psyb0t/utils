@@ -23,7 +23,7 @@ LOG_LEVEL_FATAL="FATAL"
 # Default configuration values
 ROUTER_IP="192.168.88.1"
 ROUTER_USER="admin"
-BACKUP_DIR="$HOME/mikrotik-backup"
+BACKUP_DIR="${HOME:-/tmp}/mikrotik-backup"
 BACKUP_PATH_ON_ROUTER="/"
 MAX_BACKUPS=20
 BACKUP_NAME=""
