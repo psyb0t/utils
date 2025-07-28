@@ -277,6 +277,12 @@ validate_and_set_mediatype() {
         # Try auto-detection
         if auto_detected_type=$(auto_detect_file_type "$FILE"); then
             echo -e "🎯 ${YELLOW}Auto-detected file type:${NC} $auto_detected_type mode"
+            # Set the global mode variables
+            if [[ "$auto_detected_type" == "zim" ]]; then
+                ZIM_MODE="true"
+            elif [[ "$auto_detected_type" == "pdf" ]]; then
+                PDF_MODE="true"
+            fi
         else
             pretty_exit "A mediatype flag is required. Use one of: --mediatype-texts, --mediatype-audio, --mediatype-movies, --mediatype-software, --mediatype-web, --mediatype-image, --mediatype-data, --mediatype-etree, --mediatype-collection, --zim, or --pdf"
         fi
@@ -423,45 +429,6 @@ if [[ -z "$TITLE" ]]; then
 fi
 
 
-# Handle ZIM mode metadata auto-population
-if [[ "$ZIM_MODE" == "true" ]]; then
-
-    # Try to parse creator and date from ZIM filename
-    if parse_result=$(parse_zim_filename "$FILE"); then
-        # Extract creator and date from parse result
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^creator:(.+)$ ]]; then
-                zim_creator="${BASH_REMATCH[1]}"
-            elif [[ "$line" =~ ^date:(.+)$ ]]; then
-                zim_date="${BASH_REMATCH[1]}"
-            fi
-        done <<< "$parse_result"
-
-        # Track what was auto-detected for confirmation prompt
-        auto_detected_fields=()
-
-        # Set creator and date if not already specified by user
-        if [[ -z "$CREATOR" && -n "$zim_creator" ]]; then
-            CREATOR="$zim_creator"
-            auto_detected_fields+=("creator: $CREATOR")
-        fi
-
-        if [[ -z "$DATE" && -n "$zim_date" ]]; then
-            DATE="$zim_date"
-            auto_detected_fields+=("date: $DATE")
-        fi
-
-        # Show confirmation if any fields were auto-detected
-        if [[ ${#auto_detected_fields[@]} -gt 0 ]]; then
-            echo -e "🔍 ${PURPLE}Auto-detected from ZIM filename:${NC}"
-            for field in "${auto_detected_fields[@]}"; do
-                echo -e "  ✨ $field"
-            done
-            echo ""
-            ZIM_AUTO_DETECTED="true"
-        fi
-    fi
-fi
 
 # Handle PDF mode metadata auto-population
 if [[ "$PDF_MODE" == "true" ]]; then
@@ -520,6 +487,45 @@ fi
 # Validate and get the selected mediatype
 validate_and_set_mediatype
 
+# Handle ZIM mode metadata auto-population (moved here after mediatype validation)
+if [[ "$ZIM_MODE" == "true" ]]; then
+
+    # Try to parse creator and date from ZIM filename
+    if parse_result=$(parse_zim_filename "$FILE"); then
+        # Extract creator and date from parse result
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^creator:(.+)$ ]]; then
+                zim_creator="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^date:(.+)$ ]]; then
+                zim_date="${BASH_REMATCH[1]}"
+            fi
+        done <<< "$parse_result"
+
+        # Track what was auto-detected for confirmation prompt
+        auto_detected_fields=()
+
+        # Set creator and date if not already specified by user
+        if [[ -z "$CREATOR" && -n "$zim_creator" ]]; then
+            CREATOR="$zim_creator"
+            auto_detected_fields+=("creator: $CREATOR")
+        fi
+
+        if [[ -z "$DATE" && -n "$zim_date" ]]; then
+            DATE="$zim_date"
+            auto_detected_fields+=("date: $DATE")
+        fi
+
+        # Show confirmation if any fields were auto-detected
+        if [[ ${#auto_detected_fields[@]} -gt 0 ]]; then
+            echo -e "🔍 ${PURPLE}Auto-detected from ZIM filename:${NC}"
+            for field in "${auto_detected_fields[@]}"; do
+                echo -e "  ✨ $field"
+            done
+            echo ""
+            ZIM_AUTO_DETECTED="true"
+        fi
+    fi
+fi
 
 # Auto-generate description if not provided
 if [[ -z "$DESCRIPTION" ]]; then
@@ -557,19 +563,9 @@ if [[ -z "$DESCRIPTION" ]]; then
     echo -e "📋 ${GREEN}Auto-generated description from upload details${NC}"
 fi
 
-# Check if ia is configured by testing with a known item
-if ! ia metadata internetarchive >/dev/null 2>&1; then
-    pretty_exit "ia not configured. Run 'ia configure' to set up your Internet Archive account."
-fi
-
 # Build identifier if not provided
 if [[ -z "$IDENTIFIER" ]]; then
     IDENTIFIER=$(build_identifier "$FILE")
-fi
-
-# Check if ia command is available
-if ! command -v ia &> /dev/null; then
-    pretty_exit "ia command not found. Please install internetarchive: pip install internetarchive"
 fi
 
 
@@ -611,13 +607,24 @@ if [[ -n "$LICENSE" ]]; then echo -e "⚖️  ${BOLD}License:${NC} $LICENSE"; fi
 echo -e "${CYAN}═══════════════════════════════════════${NC}"
 
 
+# Check if ia command is available
+if ! command -v ia &> /dev/null; then
+    pretty_exit "ia command not found. Please install internetarchive: pip install internetarchive"
+fi
+
+# Check if ia is configured by testing with a known item
+if ! ia metadata internetarchive >/dev/null 2>&1; then
+    pretty_exit "ia not configured. Run 'ia configure' to set up your Internet Archive account."
+fi
+
 # Upload
 echo -e "🚀 ${YELLOW}Starting upload...${NC}"
 echo ""
 if ia upload "$IDENTIFIER" "$FILE" "${METADATA_ARGS[@]}" --retries 3 --verify; then
     echo ""
     echo -e "🎉 ${GREEN}${BOLD}Upload complete!${NC} 🌟"
-    echo -e "🔗 ${BLUE}https://archive.org/details/$IDENTIFIER${NC}"
+    echo -e "📄 ${BLUE}Item page: https://archive.org/details/$IDENTIFIER${NC}"
+    echo -e "⬇️  ${CYAN}Direct download: https://archive.org/download/$IDENTIFIER/$(basename "$FILE")${NC}"
 else
     pretty_exit "Upload failed"
 fi
