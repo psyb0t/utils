@@ -216,15 +216,15 @@ get_mediatype_selection() {
     local count=0
     local selected_type=""
 
-    [[ "$MEDIATYPE_TEXTS" == "true" ]] && ((count++)) && selected_type="texts"
-    [[ "$MEDIATYPE_AUDIO" == "true" ]] && ((count++)) && selected_type="audio"
-    [[ "$MEDIATYPE_MOVIES" == "true" ]] && ((count++)) && selected_type="movies"
-    [[ "$MEDIATYPE_SOFTWARE" == "true" ]] && ((count++)) && selected_type="software"
-    [[ "$MEDIATYPE_WEB" == "true" ]] && ((count++)) && selected_type="web"
-    [[ "$MEDIATYPE_IMAGE" == "true" ]] && ((count++)) && selected_type="image"
-    [[ "$MEDIATYPE_DATA" == "true" ]] && ((count++)) && selected_type="data"
-    [[ "$MEDIATYPE_ETREE" == "true" ]] && ((count++)) && selected_type="etree"
-    [[ "$MEDIATYPE_COLLECTION" == "true" ]] && ((count++)) && selected_type="collection"
+    [[ "$MEDIATYPE_TEXTS" == "true" ]] && count=$((count + 1)) && selected_type="texts"
+    [[ "$MEDIATYPE_AUDIO" == "true" ]] && count=$((count + 1)) && selected_type="audio"
+    [[ "$MEDIATYPE_MOVIES" == "true" ]] && count=$((count + 1)) && selected_type="movies"
+    [[ "$MEDIATYPE_SOFTWARE" == "true" ]] && count=$((count + 1)) && selected_type="software"
+    [[ "$MEDIATYPE_WEB" == "true" ]] && count=$((count + 1)) && selected_type="web"
+    [[ "$MEDIATYPE_IMAGE" == "true" ]] && count=$((count + 1)) && selected_type="image"
+    [[ "$MEDIATYPE_DATA" == "true" ]] && count=$((count + 1)) && selected_type="data"
+    [[ "$MEDIATYPE_ETREE" == "true" ]] && count=$((count + 1)) && selected_type="etree"
+    [[ "$MEDIATYPE_COLLECTION" == "true" ]] && count=$((count + 1)) && selected_type="collection"
 
     # If ZIM mode, override mediatype to data
     if [[ "$ZIM_MODE" == "true" ]]; then
@@ -256,15 +256,15 @@ get_mediatype_selection() {
 validate_and_set_mediatype() {
     local count=0
 
-    [[ "$MEDIATYPE_TEXTS" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_AUDIO" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_MOVIES" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_SOFTWARE" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_WEB" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_IMAGE" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_DATA" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_ETREE" == "true" ]] && ((count++))
-    [[ "$MEDIATYPE_COLLECTION" == "true" ]] && ((count++))
+    [[ "$MEDIATYPE_TEXTS" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_AUDIO" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_MOVIES" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_SOFTWARE" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_WEB" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_IMAGE" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_DATA" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_ETREE" == "true" ]] && count=$((count + 1))
+    [[ "$MEDIATYPE_COLLECTION" == "true" ]] && count=$((count + 1))
 
     # Check for conflicts and warnings
     if [[ "$ZIM_MODE" == "true" && $count -gt 0 ]]; then
