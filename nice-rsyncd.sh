@@ -168,6 +168,7 @@ run_sync() {
   local rsync_output
   rsync_output=$("${cmd[@]}" "${src}/" "${dest}/" 2>&1) || {
     log ERROR "rsync failed for $src -> $dest"
+    echo "$rsync_output"
     return 1
   }
 
