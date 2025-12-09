@@ -164,16 +164,23 @@ run_sync() {
 
   log INFO "Starting sync ($mode): $src -> $dest"
 
-  # Run rsync and capture output
-  local rsync_output
-  rsync_output=$("${cmd[@]}" "${src}/" "${dest}/" 2>&1) || {
-    log ERROR "rsync failed for $src -> $dest"
-    echo "$rsync_output"
-    return 1
-  }
+  # Create temp file for stderr
+  local err_file
+  err_file=$(mktemp)
 
-  # Show rsync output to user
-  echo "$rsync_output"
+  # Run rsync with real-time output, capture stderr separately
+  "${cmd[@]}" "${src}/" "${dest}/" 2>"$err_file"
+  local rsync_exit=$?
+
+  # If failed, show error output
+  if [[ $rsync_exit -ne 0 ]]; then
+    log ERROR "rsync failed for $src -> $dest (exit code: $rsync_exit)"
+    cat "$err_file" >&2
+    rm -f "$err_file"
+    return 1
+  fi
+
+  rm -f "$err_file"
   log INFO "Finished sync ($mode): $src"
 }
 
