@@ -1,23 +1,22 @@
-name: pipeline
+name: mirror-and-archive
 
-# One file, every trigger. There is no build or publish chain in this repo, so
-# the pipeline is just the mirror and the archive -- they used to be a workflow
-# file each, which meant three files re-declaring three trigger blocks.
-
+# The offsite copies of this repository: the GitLab mirror, the Wayback Machine
+# and Software Heritage. Kept out of pipeline.yml because they share a trigger
+# set with each other and with nothing in the build chain -- folding them in
+# would drag the monthly cron across every build job, and each one would need an
+# event guard to ignore it.
 on:
-  # Every branch and every tag: the mirror needs to see all of them, and the
-  # jobs below carry their own ref guards.
+  # Every branch and every tag. The mirror has to see all of them; a mirror that
+  # only saw the default branch would silently drop the rest.
   push:
   # Staggered per repository. The Wayback Machine is rate-limited and one save
   # takes ~110s, so a shared cron would have every repo throttling the rest.
+  # Without it the archive would never run for a repo that rarely cuts releases.
   schedule:
     - cron: "33 18 22 * *"
   workflow_dispatch:
 
 jobs:
-
-  # Every branch and every tag, which is why it carries no ref filter: a mirror
-  # that only saw the default branch would silently drop the rest.
   mirror:
     if: github.event_name == 'push'
     uses: psyb0t/reusable-github-workflows/.github/workflows/git-mirror.yml@master
@@ -31,9 +30,8 @@ jobs:
     secrets:
       gitlab_token: ${{ secrets.GITLAB_TOKEN }}
 
-  # Runs on the monthly cron, on a manual dispatch, and on a push to the default
-  # branch or a tag -- but NOT on every feature-branch push, or a rate-limited
-  # archive would be hammered for no benefit.
+  # Not on every feature-branch push: the archive is rate-limited and there is
+  # nothing to gain from saving a branch tip.
   archive:
     if: >-
       github.event_name != 'push' ||
