@@ -13,6 +13,45 @@ TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 readonly MODE_BACKUP="backup"
 readonly MODE_RESTORE="restore"
 
+# Backup artifact naming. Every run writes a set of files sharing one prefix and
+# one timestamp, which is what lets the pruner treat a whole run as a unit.
+readonly BACKUP_FILE_PREFIX="mikrotik-backup_"
+readonly BACKUP_SUFFIX=".backup"
+readonly EXPORT_SUFFIX=".rsc"
+readonly EXPORT_TERSE_SUFFIX=".terse.rsc"
+readonly INVENTORY_SUFFIX=".inventory.txt"
+readonly PARTIAL_SUFFIX=".partial"
+
+# Length of the "%Y-%m-%d_%H-%M-%S" stamp embedded in every artifact name.
+readonly TIMESTAMP_LENGTH=19
+
+# Exports hold plaintext PSKs, VPN secrets and PPPoE passwords, so they are
+# created with owner-only permissions.
+readonly SECRET_FILE_MODE=600
+
+# RouterOS v7 hides sensitive values by default and reveals them with
+# show-sensitive. RouterOS v6 inverts this: it shows them by default and accepts
+# hide-sensitive instead, so both commands below fail against a v6 router.
+#
+# Compact (the default since v6rc1) exports only configuration that differs from
+# factory defaults, which is the form you hand-edit and replay onto other
+# hardware. Terse emits one full command per line including its menu path and
+# without line continuations, which is the form that diffs cleanly between runs.
+readonly ROUTEROS_EXPORT_CMD="/export show-sensitive"
+readonly ROUTEROS_EXPORT_TERSE_CMD="/export terse show-sensitive"
+
+# An export is not replayable on its own. Restoring onto different hardware
+# depends on the architecture, the RouterOS version, whether the wireless or the
+# wifi-qcom package is installed, and the physical interface names, none of
+# which the export records about the machine it came from.
+readonly INVENTORY_COMMANDS=(
+    "/system/resource/print"
+    "/system/routerboard/print"
+    "/system/package/print"
+    "/interface/print"
+    "/interface/ethernet/print"
+)
+
 # Log level constants
 LOG_LEVEL_DEBUG="DEBUG"
 LOG_LEVEL_INFO="INFO"
@@ -157,7 +196,7 @@ Options:
     --router-user USER      Router username (default: $ROUTER_USER)
     --backup-dir DIR        Local backup directory (default: $BACKUP_DIR)
     --router-path PATH      Path on router (default: $BACKUP_PATH_ON_ROUTER)
-    --max-backups NUM       Maximum number of backups to keep (default: $MAX_BACKUPS)
+    --max-backups NUM       Maximum number of backup sets to keep (default: $MAX_BACKUPS)
     --backup-name NAME      Backup filename (if not set in restore mode then the latest backup file is used)
     --continuous            Run backup in continuous mode
     --force                 Force backup creation even if recent backup exists
@@ -172,6 +211,37 @@ Examples:
     $SCRIPT_NAME restore --backup-name mikrotik-backup_2024-01-01_12-00-00.backup
     $SCRIPT_NAME restore --router-ip 192.168.88.1 --backup-name mybackup.backup --backup-dir /home/user/backups
     $SCRIPT_NAME restore --router-ip 192.168.88.1
+
+Artifacts written per backup run, all into --backup-dir:
+
+    ${BACKUP_FILE_PREFIX}<timestamp>${BACKUP_SUFFIX}
+        Binary backup. Restores only onto the same device running the same
+        RouterOS version, because it carries MAC addresses and restores them.
+        This is what restore mode uses.
+
+    ${BACKUP_FILE_PREFIX}<timestamp>${EXPORT_SUFFIX}
+        Plain-text configuration export, compact form. The portable artifact:
+        edit it and replay it onto different hardware.
+
+    ${BACKUP_FILE_PREFIX}<timestamp>${EXPORT_TERSE_SUFFIX}
+        Same configuration, one full command per line with no line
+        continuations. Diff two of these to see what changed between runs.
+
+    ${BACKUP_FILE_PREFIX}<timestamp>${INVENTORY_SUFFIX}
+        Model, architecture, RouterOS version, installed packages and interface
+        names. Needed to interpret the export later, since the export records
+        none of it.
+
+Restoring an export onto different hardware is a manual operation and this
+script does not automate it. An export excludes user passwords, certificates
+and SSH keys, and its interface-rename lines assume the source device's port
+layout. On the target device:
+
+    /system/reset-configuration no-defaults=yes skip-backup=yes
+    # reboot, then, after removing any interface-rename lines that do not apply
+    /import file-name=<file>${EXPORT_SUFFIX} verbose=yes
+
+Exports contain plaintext secrets and are written mode $SECRET_FILE_MODE.
 
 EOF
 }
@@ -381,7 +451,8 @@ check_recent_backup() {
     debug_log "Checking for recent backups newer than $MAX_BACKUP_AGE days"
 
     local recent_backups
-    recent_backups=$(find "$BACKUP_DIR" -mtime -"${MAX_BACKUP_AGE}" -name 'mikrotik-backup_*' 2>/dev/null || true)
+    # find exits non-zero on an unreadable dir; an empty result is handled below.
+    recent_backups=$(find "$BACKUP_DIR" -mtime -"${MAX_BACKUP_AGE}" -name "${BACKUP_FILE_PREFIX}*" 2>/dev/null || true)
 
     if [[ -n "$recent_backups" ]]; then
         debug_log "Found recent backup(s): $recent_backups"
@@ -392,47 +463,91 @@ check_recent_backup() {
     fi
 }
 
+list_backup_timestamps() {
+    local file base stamp
+    declare -A seen=()
+
+    # Oldest set first, so the pruner can take the head of this list. Artifacts
+    # of one run are always written before the next run starts, so keeping the
+    # first occurrence of each stamp preserves that order.
+    while IFS= read -r file; do
+        base=$(basename "$file")
+        stamp="${base#"$BACKUP_FILE_PREFIX"}"
+        stamp="${stamp:0:$TIMESTAMP_LENGTH}"
+
+        if [[ -z "$stamp" || -n "${seen[$stamp]:-}" ]]; then
+            continue
+        fi
+
+        seen["$stamp"]=1
+        echo "$stamp"
+    done < <(ls -1tr "${BACKUP_DIR}/${BACKUP_FILE_PREFIX}"* 2>/dev/null)
+}
+
+remove_backup_set() {
+    local stamp="$1"
+    local file
+
+    for file in "${BACKUP_DIR}/${BACKUP_FILE_PREFIX}${stamp}"*; do
+        # An unmatched glob stays literal, so check the path really exists.
+        if [[ ! -e "$file" ]]; then
+            continue
+        fi
+
+        if ! rm -f "$file"; then
+            log "$LOG_LEVEL_ERROR" "Failed to remove backup artifact: $(basename "$file")"
+
+            continue
+        fi
+
+        debug_log "Removed old backup artifact: $file"
+    done
+
+    log "$LOG_LEVEL_INFO" "Removed old backup set: $stamp"
+}
+
 limit_backups() {
-    debug_log "Starting backup cleanup process, max backups: $MAX_BACKUPS"
+    debug_log "Starting backup cleanup process, max backup sets: $MAX_BACKUPS"
 
-    local backups count remove_count
+    local timestamps stamp count remove_count removed=0
 
-    # Get list of backup files sorted by modification time (oldest first)
-    backups=$(ls -1tr "${BACKUP_DIR}"/mikrotik-backup_* 2>/dev/null || true)
+    # One run writes several artifacts sharing a timestamp, so the limit counts
+    # whole sets. Counting files instead would prune early and leave a run with
+    # some of its artifacts deleted and the rest kept.
+    timestamps=$(list_backup_timestamps)
 
-    if [[ -z "$backups" ]]; then
-        debug_log "No backup files found to clean up"
+    if [[ -z "$timestamps" ]]; then
+        debug_log "No backup sets found to clean up"
         return 0
     fi
 
-    count=$(echo "$backups" | wc -l)
+    count=$(echo "$timestamps" | wc -l)
     remove_count=$((count - MAX_BACKUPS))
 
-    debug_log "Found $count backups, need to remove $remove_count"
+    debug_log "Found $count backup set(s), need to remove $remove_count"
 
-    if [[ "$remove_count" -gt 0 ]]; then
-        log "$LOG_LEVEL_INFO" "Removing $remove_count old backup(s) to maintain limit of $MAX_BACKUPS"
-
-        echo "$backups" | head -n "$remove_count" | while read -r file; do
-            debug_log "Removing old backup: $file"
-            if rm -f "$file"; then
-                log "$LOG_LEVEL_INFO" "Removed old backup: $(basename "$file")"
-                debug_log "Successfully removed: $file"
-            else
-                log "$LOG_LEVEL_ERROR" "Failed to remove backup: $(basename "$file")"
-                debug_log "Failed to remove: $file"
-            fi
-        done
-    else
+    if [[ "$remove_count" -le 0 ]]; then
         debug_log "No backup cleanup needed"
+        return 0
     fi
+
+    log "$LOG_LEVEL_INFO" "Removing $remove_count old backup set(s) to maintain limit of $MAX_BACKUPS"
+
+    while IFS= read -r stamp; do
+        if [[ "$removed" -ge "$remove_count" ]]; then
+            break
+        fi
+
+        remove_backup_set "$stamp"
+        removed=$((removed + 1))
+    done <<<"$timestamps"
 }
 
 find_latest_backup() {
     debug_log "Looking for latest backup file in: $BACKUP_DIR"
 
     local latest_backup
-    latest_backup=$(ls -1t "${BACKUP_DIR}"/mikrotik-backup_*.backup 2>/dev/null | head -n 1 || true)
+    latest_backup=$(ls -1t "${BACKUP_DIR}/${BACKUP_FILE_PREFIX}"*"${BACKUP_SUFFIX}" 2>/dev/null | head -n 1 || true)
 
     if [[ -z "$latest_backup" ]]; then
         debug_log "No backup files found"
@@ -447,11 +562,128 @@ find_latest_backup() {
 # BACKUP OPERATIONS
 # ============================================================================
 
+fetch_router_output() {
+    local command="$1" destination="$2"
+    local partial="${destination}${PARTIAL_SUFFIX}"
+
+    debug_log "Running on router: $command"
+
+    # Create the file before writing so the secrets never exist world-readable,
+    # even briefly.
+    : >"$partial"
+    chmod "$SECRET_FILE_MODE" "$partial"
+
+    # RouterOS terminates terminal output with CRLF. Stripping CR keeps the
+    # files usable by local tooling and makes them diff cleanly.
+    if ! ssh "${ROUTER_USER}@${ROUTER_IP}" "$command" | tr -d '\r' >"$partial"; then
+        debug_log "Router command failed: $command"
+        rm -f "$partial"
+
+        return 1
+    fi
+
+    if [[ ! -s "$partial" ]]; then
+        debug_log "Router returned no output for: $command"
+        rm -f "$partial"
+
+        return 1
+    fi
+
+    mv "$partial" "$destination"
+    debug_log "Wrote $(du -h "$destination" | cut -f1) to $destination"
+
+    return 0
+}
+
+create_inventory() {
+    local destination="$1"
+    local partial="${destination}${PARTIAL_SUFFIX}"
+    local command collected=0 failed=0
+
+    debug_log "Collecting router inventory"
+
+    : >"$partial"
+    chmod "$SECRET_FILE_MODE" "$partial"
+
+    # Menus differ across models and RouterOS versions, so a missing one is
+    # expected and only the whole set coming back empty counts as a failure.
+    for command in "${INVENTORY_COMMANDS[@]}"; do
+        printf '### %s\n' "$command" >>"$partial"
+
+        if ! ssh "${ROUTER_USER}@${ROUTER_IP}" "$command" | tr -d '\r' >>"$partial"; then
+            debug_log "Inventory command unavailable: $command"
+            printf '(command failed or unsupported on this device)\n' >>"$partial"
+            failed=$((failed + 1))
+            printf '\n' >>"$partial"
+
+            continue
+        fi
+
+        collected=$((collected + 1))
+        printf '\n' >>"$partial"
+    done
+
+    log "$LOG_LEVEL_INFO" "Inventory collected: $collected command(s) ok, $failed unavailable"
+
+    if [[ "$collected" -eq 0 ]]; then
+        debug_log "No inventory commands succeeded"
+        rm -f "$partial"
+
+        return 1
+    fi
+
+    mv "$partial" "$destination"
+
+    return 0
+}
+
+create_config_exports() {
+    local base_name="$1"
+    local export_path="${BACKUP_DIR}/${base_name}${EXPORT_SUFFIX}"
+    local terse_path="${BACKUP_DIR}/${base_name}${EXPORT_TERSE_SUFFIX}"
+    local inventory_path="${BACKUP_DIR}/${base_name}${INVENTORY_SUFFIX}"
+    local failures=0
+
+    debug_log "Starting portable configuration export for: $base_name"
+    log "$LOG_LEVEL_INFO" "Exporting portable configuration..."
+
+    if fetch_router_output "$ROUTEROS_EXPORT_CMD" "$export_path"; then
+        log "$LOG_LEVEL_INFO" "Configuration export written: $(basename "$export_path")"
+    else
+        log "$LOG_LEVEL_ERROR" "Configuration export failed: $ROUTEROS_EXPORT_CMD"
+        failures=$((failures + 1))
+    fi
+
+    if fetch_router_output "$ROUTEROS_EXPORT_TERSE_CMD" "$terse_path"; then
+        log "$LOG_LEVEL_INFO" "Terse configuration export written: $(basename "$terse_path")"
+    else
+        log "$LOG_LEVEL_ERROR" "Terse configuration export failed: $ROUTEROS_EXPORT_TERSE_CMD"
+        failures=$((failures + 1))
+    fi
+
+    if create_inventory "$inventory_path"; then
+        log "$LOG_LEVEL_INFO" "Device inventory written: $(basename "$inventory_path")"
+    else
+        log "$LOG_LEVEL_ERROR" "Device inventory collection failed"
+        failures=$((failures + 1))
+    fi
+
+    if [[ "$failures" -gt 0 ]]; then
+        debug_log "Portable export finished with $failures failure(s)"
+
+        return 1
+    fi
+
+    debug_log "Portable export completed successfully"
+
+    return 0
+}
+
 create_backup() {
     debug_log "Starting backup creation process"
 
     local backup_name
-    backup_name="mikrotik-backup_${TIMESTAMP}.backup"
+    backup_name="${BACKUP_FILE_PREFIX}${TIMESTAMP}${BACKUP_SUFFIX}"
 
     debug_log "Backup filename: $backup_name"
     log "$LOG_LEVEL_INFO" "Creating backup: $backup_name"
@@ -521,6 +753,39 @@ create_backup() {
     fi
 }
 
+create_backup_set() {
+    debug_log "Creating backup set for timestamp: $TIMESTAMP"
+
+    local base_name="${BACKUP_FILE_PREFIX}${TIMESTAMP}"
+    local binary_ok=true exports_ok=true
+
+    # The binary backup and the exports are independent artifacts with different
+    # jobs, so one failing must not stop the other from being written.
+    if ! create_backup; then
+        binary_ok=false
+    fi
+
+    if ! create_config_exports "$base_name"; then
+        exports_ok=false
+    fi
+
+    if [[ "$binary_ok" == false && "$exports_ok" == false ]]; then
+        log "$LOG_LEVEL_ERROR" "Backup run produced no artifacts"
+
+        return 1
+    fi
+
+    if [[ "$binary_ok" == false ]]; then
+        log "$LOG_LEVEL_WARNING" "Binary backup failed, portable exports were still written"
+    fi
+
+    if [[ "$exports_ok" == false ]]; then
+        log "$LOG_LEVEL_WARNING" "Portable exports incomplete, binary backup was still written"
+    fi
+
+    return 0
+}
+
 backup_mode() {
     debug_log "Entering backup mode"
 
@@ -576,7 +841,7 @@ run_single_backup() {
     if [[ "$FORCE_BACKUP" == true ]]; then
         debug_log "Force backup enabled, creating backup regardless of age"
         log "$LOG_LEVEL_INFO" "Force backup enabled - creating backup regardless of age"
-        create_backup
+        create_backup_set
     elif check_recent_backup; then
         debug_log "Recent backup found, skipping new backup creation"
         log "$LOG_LEVEL_INFO" "A backup newer than $MAX_BACKUP_AGE days exists. Skipping new backup creation."
@@ -584,7 +849,7 @@ run_single_backup() {
     else
         debug_log "No recent backup found, creating new backup"
         log "$LOG_LEVEL_INFO" "No recent backup found. Creating a new backup."
-        create_backup
+        create_backup_set
     fi
 
     # Clean up old backups
@@ -615,14 +880,14 @@ run_continuous_backup() {
         if [[ "$FORCE_BACKUP" == true ]]; then
             debug_log "Force backup enabled for continuous run"
             log "$LOG_LEVEL_INFO" "Force backup enabled - creating backup"
-            create_backup
+            create_backup_set
         elif check_recent_backup; then
             debug_log "Recent backup found, skipping this run"
             log "$LOG_LEVEL_INFO" "A backup newer than $MAX_BACKUP_AGE days exists. Skipping new backup creation."
         else
             debug_log "No recent backup found, creating new backup"
             log "$LOG_LEVEL_INFO" "No recent backup found. Creating a new backup."
-            create_backup
+            create_backup_set
         fi
 
         # Limit the number of stored backups

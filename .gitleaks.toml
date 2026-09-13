@@ -1,0 +1,4 @@
+# Extends the bundled gitleaks ruleset rather than replacing it, so upstream
+# rule updates keep applying.
+[extend]
+useDefault = true
