@@ -40,6 +40,20 @@ readonly SECRET_FILE_MODE=600
 readonly ROUTEROS_EXPORT_CMD="/export show-sensitive"
 readonly ROUTEROS_EXPORT_TERSE_CMD="/export terse show-sensitive"
 
+# Every ssh and scp call gets a connect timeout and keepalives. Without them a
+# router that stops answering mid-transfer leaves the call, and with it the
+# continuous loop, hanging with nothing logged.
+readonly SSH_OPTS=(
+    -o BatchMode=yes
+    -o ConnectTimeout=15
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=4
+)
+
+# An export opens with comment lines carrying the export time and the serial
+# number. They differ on every run, so the change check ignores them.
+readonly EXPORT_COMMENT_PATTERN='^#'
+
 # An export is not replayable on its own. Restoring onto different hardware
 # depends on the architecture, the RouterOS version, whether the wireless or the
 # wifi-qcom package is installed, and the physical interface names, none of
@@ -201,7 +215,7 @@ Options:
     --continuous            Run backup in continuous mode
     --force                 Force backup creation even if recent backup exists
     --sleep-interval MIN    Sleep interval in minutes for continuous mode (default: $SLEEP_INTERVAL)
-    --max-backup-age DAYS   Maximum age in days before creating new backup (default: $MAX_BACKUP_AGE)
+    --max-backup-age DAYS   Back up when the newest backup is older than this many days (default: $MAX_BACKUP_AGE)
     --help                  Show this help message
 
 Examples:
@@ -211,6 +225,11 @@ Examples:
     $SCRIPT_NAME restore --backup-name mikrotik-backup_2024-01-01_12-00-00.backup
     $SCRIPT_NAME restore --router-ip 192.168.88.1 --backup-name mybackup.backup --backup-dir /home/user/backups
     $SCRIPT_NAME restore --router-ip 192.168.88.1
+
+A run also backs up when the router configuration differs from the newest
+saved terse export, so a change is saved on the next run instead of waiting for
+--max-backup-age. In continuous mode an unreachable router or a failed run is
+logged and retried on the next run; it never ends the loop.
 
 Artifacts written per backup run, all into --backup-dir:
 
@@ -284,7 +303,7 @@ test_router_connection() {
     log "$LOG_LEVEL_INFO" "Testing connection to router..."
 
     # Test SSH connection with a simple command
-    if ssh -o ConnectTimeout=10 -o BatchMode=yes "${ROUTER_USER}@${ROUTER_IP}" "/system resource print" &>/dev/null; then
+    if ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/system resource print" &>/dev/null; then
         log "$LOG_LEVEL_INFO" "Router connection test successful"
         debug_log "SSH connection to router established successfully"
         return 0
@@ -463,6 +482,63 @@ check_recent_backup() {
     fi
 }
 
+find_latest_terse_export() {
+    # ls exits non-zero when nothing matches; an empty result means no export yet.
+    ls -1t "${BACKUP_DIR}/${BACKUP_FILE_PREFIX}"*"${EXPORT_TERSE_SUFFIX}" 2>/dev/null | head -n 1 || true
+}
+
+config_changed_since_last_backup() {
+    # Returns 0 when the router configuration differs from the newest saved
+    # terse export, or when there is no saved export to compare against.
+    local latest current
+    latest=$(find_latest_terse_export)
+
+    if [[ -z "$latest" ]]; then
+        debug_log "No saved terse export to compare against"
+        return 0
+    fi
+
+    current="${BACKUP_DIR}/.current${EXPORT_TERSE_SUFFIX}"
+
+    if ! fetch_router_output "$ROUTEROS_EXPORT_TERSE_CMD" "$current"; then
+        log "$LOG_LEVEL_WARNING" "Could not read the router configuration to check for changes"
+        return 1
+    fi
+
+    # grep -v exits 1 when every line is a comment, which only shortens the input.
+    if diff -q \
+        <(grep -v -E "$EXPORT_COMMENT_PATTERN" "$latest" || true) \
+        <(grep -v -E "$EXPORT_COMMENT_PATTERN" "$current" || true) >/dev/null; then
+        rm -f "$current"
+        debug_log "Configuration unchanged since $(basename "$latest")"
+        return 1
+    fi
+
+    rm -f "$current"
+    debug_log "Configuration differs from $(basename "$latest")"
+    return 0
+}
+
+should_create_backup() {
+    if [[ "$FORCE_BACKUP" == true ]]; then
+        log "$LOG_LEVEL_INFO" "Creating backup: forced"
+        return 0
+    fi
+
+    if ! check_recent_backup; then
+        log "$LOG_LEVEL_INFO" "Creating backup: none newer than $MAX_BACKUP_AGE days"
+        return 0
+    fi
+
+    if config_changed_since_last_backup; then
+        log "$LOG_LEVEL_INFO" "Creating backup: configuration changed since the last one"
+        return 0
+    fi
+
+    log "$LOG_LEVEL_INFO" "Skipping backup: a recent one exists and the configuration is unchanged"
+    return 1
+}
+
 list_backup_timestamps() {
     local file base stamp
     declare -A seen=()
@@ -575,7 +651,7 @@ fetch_router_output() {
 
     # RouterOS terminates terminal output with CRLF. Stripping CR keeps the
     # files usable by local tooling and makes them diff cleanly.
-    if ! ssh "${ROUTER_USER}@${ROUTER_IP}" "$command" | tr -d '\r' >"$partial"; then
+    if ! ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "$command" | tr -d '\r' >"$partial"; then
         debug_log "Router command failed: $command"
         rm -f "$partial"
 
@@ -610,7 +686,7 @@ create_inventory() {
     for command in "${INVENTORY_COMMANDS[@]}"; do
         printf '### %s\n' "$command" >>"$partial"
 
-        if ! ssh "${ROUTER_USER}@${ROUTER_IP}" "$command" | tr -d '\r' >>"$partial"; then
+        if ! ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "$command" | tr -d '\r' >>"$partial"; then
             debug_log "Inventory command unavailable: $command"
             printf '(command failed or unsupported on this device)\n' >>"$partial"
             failed=$((failed + 1))
@@ -692,7 +768,7 @@ create_backup() {
     debug_log "Executing backup command on router"
     log "$LOG_LEVEL_INFO" "Requesting backup creation on router..."
 
-    if ssh "${ROUTER_USER}@${ROUTER_IP}" "/system backup save name=\"${backup_name}\""; then
+    if ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/system backup save name=\"${backup_name}\""; then
         debug_log "Backup creation command succeeded"
         log "$LOG_LEVEL_INFO" "Backup created on router successfully"
 
@@ -710,9 +786,16 @@ create_backup() {
         debug_log "Remote path: $remote_path"
         debug_log "Local path: $local_path"
 
-        if scp "$remote_path" "$local_path"; then
+        if scp "${SSH_OPTS[@]}" "$remote_path" "$local_path"; then
             debug_log "Backup file downloaded successfully"
             log "$LOG_LEVEL_INFO" "Backup ${backup_name} downloaded successfully"
+
+            # The binary backup carries user password hashes and wireless keys,
+            # and scp creates it with the default umask.
+            if ! chmod "$SECRET_FILE_MODE" "$local_path"; then
+                log "$LOG_LEVEL_ERROR" "Failed to restrict permissions on ${backup_name}"
+                return 1
+            fi
 
             # Verify the downloaded file exists and has content
             if [[ -f "$local_path" && -s "$local_path" ]]; then
@@ -726,7 +809,7 @@ create_backup() {
 
             # Remove the backup file from the router to save space
             debug_log "Cleaning up backup file from router"
-            if ssh "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${backup_name}\""; then
+            if ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${backup_name}\""; then
                 debug_log "Backup file removed from router successfully"
                 log "$LOG_LEVEL_INFO" "Backup file cleaned up from router"
             else
@@ -742,7 +825,7 @@ create_backup() {
 
             # Try to clean up the failed backup on router
             debug_log "Attempting to clean up failed backup on router"
-            ssh "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${backup_name}\"" 2>/dev/null || true
+            ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${backup_name}\"" 2>/dev/null || true
 
             return 1
         fi
@@ -819,8 +902,9 @@ EOF
         )"
     fi
 
-    # Test router connection before starting
-    if ! test_router_connection; then
+    # Continuous mode checks the connection on every run instead, so a router
+    # that is down at startup only delays the first backup.
+    if [[ "$CONTINUOUS_MODE" != true ]] && ! test_router_connection; then
         debug_log "Router connection test failed, aborting"
         log "$LOG_LEVEL_FATAL" "Cannot connect to router, aborting backup process"
     fi
@@ -837,19 +921,8 @@ EOF
 run_single_backup() {
     debug_log "Running single backup operation"
 
-    # Check for recent backups first (unless forced)
-    if [[ "$FORCE_BACKUP" == true ]]; then
-        debug_log "Force backup enabled, creating backup regardless of age"
-        log "$LOG_LEVEL_INFO" "Force backup enabled - creating backup regardless of age"
-        create_backup_set
-    elif check_recent_backup; then
-        debug_log "Recent backup found, skipping new backup creation"
-        log "$LOG_LEVEL_INFO" "A backup newer than $MAX_BACKUP_AGE days exists. Skipping new backup creation."
-        log "$LOG_LEVEL_INFO" "Use --force to create backup anyway"
-    else
-        debug_log "No recent backup found, creating new backup"
-        log "$LOG_LEVEL_INFO" "No recent backup found. Creating a new backup."
-        create_backup_set
+    if should_create_backup && ! create_backup_set; then
+        log "$LOG_LEVEL_ERROR" "Backup run failed"
     fi
 
     # Clean up old backups
@@ -876,18 +949,12 @@ run_continuous_backup() {
         TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
         debug_log "Updated timestamp: $TIMESTAMP"
 
-        # Check for recent backups before proceeding (unless forced)
-        if [[ "$FORCE_BACKUP" == true ]]; then
-            debug_log "Force backup enabled for continuous run"
-            log "$LOG_LEVEL_INFO" "Force backup enabled - creating backup"
-            create_backup_set
-        elif check_recent_backup; then
-            debug_log "Recent backup found, skipping this run"
-            log "$LOG_LEVEL_INFO" "A backup newer than $MAX_BACKUP_AGE days exists. Skipping new backup creation."
-        else
-            debug_log "No recent backup found, creating new backup"
-            log "$LOG_LEVEL_INFO" "No recent backup found. Creating a new backup."
-            create_backup_set
+        # A failed run must not end the loop: the next run retries, so an
+        # unreachable router only delays the backup instead of stopping it.
+        if ! test_router_connection; then
+            log "$LOG_LEVEL_ERROR" "Router unreachable, skipping run #$run_counter"
+        elif should_create_backup && ! create_backup_set; then
+            log "$LOG_LEVEL_ERROR" "Backup run #$run_counter failed, retrying next run"
         fi
 
         # Limit the number of stored backups
@@ -965,7 +1032,7 @@ EOF
     local remote_path="${ROUTER_USER}@${ROUTER_IP}:${BACKUP_PATH_ON_ROUTER}"
     debug_log "Remote path: $remote_path"
 
-    if scp "$backup_file" "$remote_path"; then
+    if scp "${SSH_OPTS[@]}" "$backup_file" "$remote_path"; then
         debug_log "Backup file uploaded successfully"
         log "$LOG_LEVEL_INFO" "Backup file uploaded to router successfully"
 
@@ -973,7 +1040,7 @@ EOF
         debug_log "Starting restore process on router"
         log "$LOG_LEVEL_INFO" "Starting restore process on router..."
 
-        if ssh "${ROUTER_USER}@${ROUTER_IP}" "/system backup load name=\"${BACKUP_NAME}\""; then
+        if ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/system backup load name=\"${BACKUP_NAME}\""; then
             debug_log "Restore command executed successfully"
             log "$LOG_LEVEL_INFO" "Backup restore completed successfully"
 
@@ -986,7 +1053,7 @@ EOF
                 debug_log "User chose to reboot router"
                 log "$LOG_LEVEL_INFO" "Rebooting router..."
 
-                if ssh "${ROUTER_USER}@${ROUTER_IP}" "/system reboot"; then
+                if ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/system reboot"; then
                     debug_log "Reboot command sent successfully"
                     log "$LOG_LEVEL_INFO" "Router reboot command sent successfully"
                 else
@@ -1002,7 +1069,7 @@ EOF
             debug_log "Cleaning up backup file from router"
             log "$LOG_LEVEL_INFO" "Cleaning up backup file from router..."
 
-            if ssh "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${BACKUP_NAME}\""; then
+            if ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${BACKUP_NAME}\""; then
                 debug_log "Backup file removed from router successfully"
                 log "$LOG_LEVEL_INFO" "Backup file cleaned up from router"
             else
@@ -1019,7 +1086,7 @@ EOF
 
             # Clean up the uploaded file
             debug_log "Cleaning up uploaded file after failed restore"
-            ssh "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${BACKUP_NAME}\"" 2>/dev/null || true
+            ssh "${SSH_OPTS[@]}" "${ROUTER_USER}@${ROUTER_IP}" "/file remove \"${BACKUP_NAME}\"" 2>/dev/null || true
 
             return 1
         fi

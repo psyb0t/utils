@@ -2,6 +2,34 @@
 
 All notable changes per release. Versions follow [semver](https://semver.org).
 
+## v0.3.0 - 2026-10-14
+
+`mikrotik-backup.sh` no longer stops for good when the router is unreachable.
+Before this release, continuous mode exited with a fatal error if the router did
+not answer at startup, and any failed backup run ended the loop through
+`set -e`. Under a process supervisor that gives up after a few quick restarts,
+one router reboot at the wrong moment stopped backups until the host itself
+restarted. Continuous mode now tests the connection on every run, logs an
+unreachable router or a failed run as an error, and retries on the next run.
+A single run without `--continuous` still exits when the router is
+unreachable.
+
+A run now also backs up when the configuration changed. Each run reads
+`/export terse show-sensitive` and compares it with the newest saved
+`.terse.rsc`, ignoring the comment lines at the top, which carry the export
+time. Any difference triggers a backup, so a change is saved on the next run
+instead of waiting for `--max-backup-age` to pass. `--force` and the age check
+work as before.
+
+The binary `.backup` file is now written mode 600, like the exports. It holds
+user password hashes and wireless keys, and scp created it with the default
+umask, readable by every local user.
+
+Every `ssh` and `scp` call now uses a 15 second connect timeout and keepalives
+that drop a connection after one minute of silence. Before, only the startup
+connection test had a timeout, so a router that stopped answering during a
+transfer could hang the loop with nothing logged.
+
 ## v0.2.0 - 2026-09-13
 
 `mikrotik-backup.sh` now writes a portable configuration export alongside the
